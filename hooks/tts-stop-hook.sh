@@ -4,10 +4,8 @@
 # Voice configuration - can be set via KOKORO_VOICE env var in ~/.claude/settings.json
 VOICE="${KOKORO_VOICE:-af_sky}"
 
-# Audio ducking configuration - lowers Apple Music volume while TTS plays (like Google Maps in CarPlay)
-# macOS only - uses AppleScript to control Apple Music's internal volume
-AUDIO_DUCK_ENABLED="${AUDIO_DUCK_ENABLED:-true}"
-AUDIO_DUCK_SCRIPT="__CLAUDE_TTS_PROJECT_DIR__/scripts/audio-duck.sh"
+# Playback (serialization + audio ducking) lives in the shared player script.
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Debug logging
 echo "[$(date)] Kokoro TTS hook triggered" >> /tmp/kokoro-hook.log
@@ -139,39 +137,18 @@ if [ -n "$claude_response" ]; then
 
   echo "[$(date)] Final response for TTS (length: ${#claude_response})" >> /tmp/kokoro-hook.log
 
-  # Kill any existing TTS processes to prevent overlapping audio
-  # This ensures the final response "wins" over any PreToolUse audio still playing
-  if pkill -9 kokoro-tts 2>/dev/null; then
-    echo "[$(date)] Killed existing kokoro-tts process" >> /tmp/kokoro-hook.log
-  fi
-
   # Save response to secure temp file to avoid pipe blocking issues
   # Use mktemp with restrictive permissions for security
   tmpfile=$(mktemp /tmp/kokoro-input.XXXXXX)
   chmod 600 "$tmpfile"
   echo "$claude_response" > "$tmpfile"
 
-  # Audio ducking: lower other audio before TTS starts
-  if [ "$AUDIO_DUCK_ENABLED" = "true" ] && [ -x "$AUDIO_DUCK_SCRIPT" ]; then
-    echo "[$(date)] Ducking audio before TTS" >> /tmp/kokoro-hook.log
-    "$AUDIO_DUCK_SCRIPT" duck
-  fi
-
-  # Run kokoro-tts in background and capture PID for audio ducking restore
-  kokoro-tts "$tmpfile" --voice "$VOICE" --stream --model "MODEL_PATH_PLACEHOLDER/kokoro-v1.0.onnx" --voices "MODEL_PATH_PLACEHOLDER/voices-v1.0.bin" >>/tmp/kokoro-hook.log 2>&1 &
-  TTS_PID=$!
-  echo "[$(date)] Started kokoro-tts with PID: $TTS_PID" >> /tmp/kokoro-hook.log
-
-  # In background: wait for TTS to finish, then restore audio volume
-  if [ "$AUDIO_DUCK_ENABLED" = "true" ] && [ -x "$AUDIO_DUCK_SCRIPT" ]; then
-    (
-      while kill -0 "$TTS_PID" 2>/dev/null; do
-        sleep 0.5
-      done
-      echo "[$(date)] TTS finished, restoring audio" >> /tmp/kokoro-hook.log
-      "$AUDIO_DUCK_SCRIPT" restore
-    ) &
-  fi
+  # Hand off to the shared serialized player: it waits (in the background, so
+  # this hook still returns instantly) for any kokoro-tts already speaking,
+  # then plays this one. No pkill here - overlapping speech used to be "solved"
+  # by killing the other stream, which just made both utterances useless.
+  "$HOOK_DIR/tts-play.sh" "$tmpfile" "$VOICE"
+  echo "[$(date)] Queued response for serialized TTS playback" >> /tmp/kokoro-hook.log
 else
   echo "[$(date)] No response found" >> /tmp/kokoro-hook.log
 fi

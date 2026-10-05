@@ -190,7 +190,16 @@ sed_in_place "s|__CLAUDE_TTS_PROJECT_DIR__|$SCRIPT_DIR|g" "$HOOKS_DIR/tts-pretoo
 echo "Creating SessionEnd TTS hook..."
 cp "$SCRIPT_DIR/hooks/tts-session-end-hook.sh" "$HOOKS_DIR/tts-session-end-hook.sh"
 
+# Shared player and canceller used by the hooks above (serialized playback)
+echo "Creating TTS player and cancel scripts..."
+cp "$SCRIPT_DIR/hooks/tts-play.sh" "$HOOKS_DIR/tts-play.sh"
+cp "$SCRIPT_DIR/hooks/tts-cancel.sh" "$HOOKS_DIR/tts-cancel.sh"
+sed_in_place "s|MODEL_PATH_PLACEHOLDER|$MODEL_DIR|g" "$HOOKS_DIR/tts-play.sh"
+sed_in_place "s|__CLAUDE_TTS_PROJECT_DIR__|$SCRIPT_DIR|g" "$HOOKS_DIR/tts-play.sh"
+
 # Make hooks executable
+chmod +x "$HOOKS_DIR/tts-play.sh"
+chmod +x "$HOOKS_DIR/tts-cancel.sh"
 chmod +x "$HOOKS_DIR/tts-stop-hook.sh"
 chmod +x "$HOOKS_DIR/tts-interrupt-hook.sh"
 chmod +x "$HOOKS_DIR/tts-pretooluse-hook.sh"
