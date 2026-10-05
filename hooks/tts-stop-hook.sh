@@ -22,6 +22,10 @@ echo "[$(date)] Hook input: $input" >> /tmp/kokoro-hook.log
 # Extract the transcript path
 transcript_path=$(echo "$input" | jq -r '.transcript_path')
 
+# The owning session, used only to name this utterance's temp file so that
+# SessionEnd can clean up its own leftovers without touching anyone else's.
+session_id=$(echo "$input" | jq -r '.session_id // empty' | tr -cd 'A-Za-z0-9-')
+
 # Debug: Log the transcript path
 echo "[$(date)] Transcript path: $transcript_path" >> /tmp/kokoro-hook.log
 
@@ -139,7 +143,10 @@ if [ -n "$claude_response" ]; then
 
   # Save response to secure temp file to avoid pipe blocking issues
   # Use mktemp with restrictive permissions for security
-  tmpfile=$(mktemp /tmp/kokoro-input.XXXXXX)
+  # Session id in the name: SessionEnd used to delete every session's pending
+  # utterance with a blanket glob, so an utterance still queued behind the lock
+  # could have its text deleted before it ever got to speak.
+  tmpfile=$(mktemp "/tmp/kokoro-input.${session_id:-unknown}.XXXXXX")
   chmod 600 "$tmpfile"
   echo "$claude_response" > "$tmpfile"
 
