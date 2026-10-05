@@ -298,12 +298,24 @@ else
     cp "$SETTINGS_FILE" "$SETTINGS_FILE.backup"
     echo "Backed up existing settings to $SETTINGS_FILE.backup"
 
-    # Merge hooks into existing settings and add KOKORO_VOICE if not present
-    jq '.hooks.UserPromptSubmit = [{"hooks": [{"type": "command", "command": "bash ~/.claude/hooks/tts-interrupt-hook.sh", "timeout": 5}]}] |
-        .hooks.PreToolUse = [{"hooks": [{"type": "command", "command": "bash ~/.claude/hooks/tts-pretooluse-hook.sh", "timeout": 5}]}] |
-        .hooks.Stop = [{"hooks": [{"type": "command", "command": "bash ~/.claude/hooks/tts-stop-hook.sh", "timeout": 10}]}] |
-        .hooks.SessionEnd = [{"hooks": [{"type": "command", "command": "bash ~/.claude/hooks/tts-session-end-hook.sh", "timeout": 5}]}] |
-        .hooks.SessionStart = [{"hooks": [{"type": "command", "command": "bash ~/.claude/hooks/tts-session-start-hook.sh", "timeout": 5}]}] |
+    # Merge hooks into existing settings and add KOKORO_VOICE if not present.
+    # Each TTS hook is added without touching the user's other hooks: drop any
+    # previous copy of our command (so reinstalling is idempotent), drop
+    # entries that held only that command, then append ours.
+    jq 'def add_hook(event; cmd; timeout):
+          .hooks[event] = (
+            ((.hooks[event] // [])
+              | map(if any(.hooks[]?; .command == cmd)
+                    then .hooks |= map(select(.command != cmd))
+                    else . end)
+              | map(select((.hooks // [null]) | length > 0)))
+            + [{"hooks": [{"type": "command", "command": cmd, "timeout": timeout}]}]
+          );
+        add_hook("UserPromptSubmit"; "bash ~/.claude/hooks/tts-interrupt-hook.sh"; 5) |
+        add_hook("PreToolUse"; "bash ~/.claude/hooks/tts-pretooluse-hook.sh"; 5) |
+        add_hook("Stop"; "bash ~/.claude/hooks/tts-stop-hook.sh"; 10) |
+        add_hook("SessionEnd"; "bash ~/.claude/hooks/tts-session-end-hook.sh"; 5) |
+        add_hook("SessionStart"; "bash ~/.claude/hooks/tts-session-start-hook.sh"; 5) |
         .env.KOKORO_VOICE //= "af_sky"' \
         "$SETTINGS_FILE" > "$SETTINGS_FILE.tmp" && mv "$SETTINGS_FILE.tmp" "$SETTINGS_FILE"
 
