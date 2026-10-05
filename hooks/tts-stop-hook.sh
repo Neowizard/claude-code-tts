@@ -65,8 +65,11 @@ while IFS= read -r line; do
     fi
   fi
 done < <(tail -r "$transcript_path")
-# Truncate to 5000 characters
-claude_response="${claude_response:0:5000}"
+
+# NOTE: no truncation here. The cap is applied AFTER marker extraction (below),
+# because the summary marker sits at the END of a response: truncating first
+# sliced the marker off any long answer, so extraction never saw it and the hook
+# silently fell back to speaking the first 5000 characters of the full response.
 
 # Debug: Log what was extracted
 echo "[$(date)] Extracted response: $claude_response" >> /tmp/kokoro-hook.log
@@ -80,13 +83,28 @@ if [ -n "$claude_response" ]; then
   if echo "$claude_response" | grep -q "<!-- TTS_SUMMARY"; then
     # Extract only the TTS_SUMMARY content
     # Note: $claude_response is already flattened to a single line by tr '\n' ' ' earlier
-    # Uses awk with index() to extract text between markers on a single line
+    # Uses awk to extract text between markers on a single line.
+    # Scans for the LAST opening marker, not the first: a response that quotes the
+    # marker syntax while explaining it would otherwise hijack the extraction and
+    # yield the example's placeholder text instead of the real summary (observed
+    # 2026-08-19 -- a 3-character "..." was spoken). The real summary is always last.
     tts_summary=$(echo "$claude_response" | awk '
       {
-        start = index($0, "<!-- TTS_SUMMARY")
+        open_tag = "<!-- TTS_SUMMARY"
+        close_tag = "TTS_SUMMARY -->"
+        open_len = length(open_tag)
+
+        # Walk every occurrence of the opening marker, keeping the final one.
+        start = 0
+        search_from = 1
+        while ((hit = index(substr($0, search_from), open_tag)) > 0) {
+          start = search_from + hit - 1
+          search_from = start + open_len
+        }
+
         if (start > 0) {
-          rest = substr($0, start + 16)  # 16 = length("<!-- TTS_SUMMARY")
-          end = index(rest, "TTS_SUMMARY -->")
+          rest = substr($0, start + open_len)
+          end = index(rest, close_tag)
           if (end > 0) {
             content = substr(rest, 1, end - 1)
             gsub(/^[[:space:]]+/, "", content)
@@ -110,6 +128,13 @@ if [ -n "$claude_response" ]; then
     # Strip markdown formatting using mistune Python library
     # Full absolute path ensures script works regardless of current working directory
     claude_response=$(echo "$claude_response" | uv run --project "__CLAUDE_TTS_PROJECT_DIR__" python "__CLAUDE_TTS_PROJECT_DIR__/scripts/strip_markdown.py" 2>>/tmp/kokoro-hook.log || echo "$claude_response")
+  fi
+
+  # Cap what is actually spoken (an extracted summary is short; this bounds the
+  # no-marker fallback, which is the whole response).
+  if [ "${#claude_response}" -gt 5000 ]; then
+    echo "[$(date)] Truncating spoken text from ${#claude_response} to 5000 chars" >> /tmp/kokoro-hook.log
+    claude_response="${claude_response:0:5000}"
   fi
 
   echo "[$(date)] Final response for TTS (length: ${#claude_response})" >> /tmp/kokoro-hook.log
