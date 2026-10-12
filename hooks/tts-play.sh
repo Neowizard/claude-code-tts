@@ -129,8 +129,12 @@ if [ "$acquired" = "1" ] && [ "$waited_tenths" -gt 0 ]; then
   log "Acquired TTS lock after $((waited_tenths / 10))s of waiting"
 fi
 
-# Release the lock however we leave: normal end, kill, or interrupt.
-trap 'rm -rf "$LOCK_DIR"; rm -f "$TEXT_FILE"' EXIT INT TERM
+# Release the lock however we leave. On INT/TERM, stop kokoro-tts and exit:
+# a bash trap that just returns lets the script carry on, so it released the
+# lock while kokoro-tts kept speaking (or went on to start it without the lock).
+kokoro_pid=""
+trap 'rm -rf "$LOCK_DIR"; rm -f "$TEXT_FILE"' EXIT
+trap '[ -n "$kokoro_pid" ] && kill -9 "$kokoro_pid" 2>/dev/null; exit 143' INT TERM
 
 # A cancel can land between the last check in the loop and taking the lock.
 drop_if_cancelled "just before playback" && exit 0
