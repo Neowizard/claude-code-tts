@@ -22,7 +22,11 @@ else
   killed=1
 fi
 
-# Stale locks (player died without releasing) are cleared by waiting players,
-# one at a time - not here, where removing by pathname could race a new player.
+# The player releases the lock via its EXIT trap; clear it if that process is
+# already gone.
+holder=$(cat "$LOCK_DIR/pid" 2>/dev/null)
+if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
+  rm -rf "$LOCK_DIR"
+fi
 
 exit $killed
