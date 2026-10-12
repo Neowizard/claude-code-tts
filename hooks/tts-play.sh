@@ -28,6 +28,7 @@ VOICE="${2:-${KOKORO_VOICE:-af_sky}}"
 
 LOG_FILE="${KOKORO_LOG:-/tmp/kokoro-hook.log}"
 LOCK_DIR="${KOKORO_LOCK_DIR:-/tmp/kokoro-tts.lock}"
+REAP_DIR="$LOCK_DIR.reap"
 GEN_FILE="${KOKORO_GEN_FILE:-/tmp/kokoro-tts-generation}"
 MAX_WAIT_SECONDS="${KOKORO_MAX_WAIT_SECONDS:-300}"
 # A lock dir with no pid file is a player between mkdir and writing its pid;
@@ -72,10 +73,40 @@ drop_if_cancelled() {
   return 1
 }
 
+# GNU stat first: BSD stat rejects -c outright, so the fallback is unambiguous.
 dir_age_seconds() {
   local mtime
-  mtime=$(stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null) || return 1
+  mtime=$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null) || return 1
   echo $(( $(date +%s) - mtime ))
+}
+
+# The inode identifies one particular lock dir, not just its pathname.
+lock_inode() {
+  stat -c %i "$LOCK_DIR" 2>/dev/null || stat -f %i "$LOCK_DIR" 2>/dev/null
+}
+
+# Removes the lock only if it is still the same dir that was judged stale and
+# its pid file still says what it said then. Another waiter may already have
+# cleared that lock and a new player re-created it at the same path; deleting
+# by pathname alone would remove the live lock and let two players overlap.
+#
+# Waiters clear stale locks one at a time, under a second lock (REAP_DIR).
+# Inside it the check-then-delete is safe: a stale lock has no live owner to
+# release it, and no other waiter can remove it, so it cannot be swapped for
+# a new one between the check and the rm.
+clear_stale_lock() { # <inode seen> <pid seen, may be empty> <reason>
+  if ! mkdir "$REAP_DIR" 2>/dev/null; then
+    # A reaper only holds this for milliseconds; an old one died holding it.
+    local age
+    age=$(dir_age_seconds "$REAP_DIR")
+    [ -n "$age" ] && [ "$age" -ge 10 ] && rmdir "$REAP_DIR" 2>/dev/null
+    return
+  fi
+  if [ "$(lock_inode)" = "$1" ] && [ "$(cat "$LOCK_DIR/pid" 2>/dev/null)" = "$2" ]; then
+    rm -rf "$LOCK_DIR"
+    log "$3"
+  fi
+  rmdir "$REAP_DIR"
 }
 
 waited_tenths=0
@@ -95,21 +126,20 @@ while :; do
   fi
 
   # Clear a lock left behind by a process that died without releasing it.
+  # Inode first: if the lock is replaced after this, the recheck catches it.
+  inode=$(lock_inode)
   holder=$(cat "$LOCK_DIR/pid" 2>/dev/null)
-  if [ -z "$holder" ] && [ -d "$LOCK_DIR" ]; then
+  if [ -n "$inode" ] && [ -z "$holder" ]; then
     age=$(dir_age_seconds "$LOCK_DIR")
     if [ -n "$age" ] && [ "$age" -ge "$NO_PID_GRACE_SECONDS" ]; then
-      log "Clearing abandoned lock with no pid (${age}s old)"
-      rm -rf "$LOCK_DIR"
+      clear_stale_lock "$inode" "" "Clearing abandoned lock with no pid (${age}s old)"
       continue
     fi
   fi
   if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
     sleep 0.2
-    still=$(cat "$LOCK_DIR/pid" 2>/dev/null)
-    if [ "$still" = "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
-      log "Clearing stale lock held by dead pid $holder"
-      rm -rf "$LOCK_DIR"
+    if ! kill -0 "$holder" 2>/dev/null; then
+      clear_stale_lock "$inode" "$holder" "Clearing stale lock held by dead pid $holder"
     fi
     waited_tenths=$((waited_tenths + 2))
     continue
@@ -129,8 +159,13 @@ if [ "$acquired" = "1" ] && [ "$waited_tenths" -gt 0 ]; then
   log "Acquired TTS lock after $((waited_tenths / 10))s of waiting"
 fi
 
-# Release the lock however we leave: normal end, kill, or interrupt.
-trap 'rm -rf "$LOCK_DIR"; rm -f "$TEXT_FILE"' EXIT INT TERM
+# Release the lock however we leave: normal end, kill, or interrupt. Only if it
+# is still ours - never delete a lock some other player now holds.
+release() {
+  [ "$(cat "$LOCK_DIR/pid" 2>/dev/null)" = "$$" ] && rm -rf "$LOCK_DIR"
+  rm -f "$TEXT_FILE"
+}
+trap release EXIT INT TERM
 
 # A cancel can land between the last check in the loop and taking the lock.
 drop_if_cancelled "just before playback" && exit 0
